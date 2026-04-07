@@ -1,0 +1,23 @@
+[
+  {
+    "checkin": "2026-10-20",
+    "checkout": "2026-10-18",
+    "expectedStatus": 400,
+    "expectedError": "Fechas inválidas",
+    "description": "TC-HU11-01: checkout anterior a checkin"
+  },
+  {
+    "checkin": "2026-10-20",
+    "checkout": "2026-10-20",
+    "expectedStatus": 400,
+    "expectedError": "estancia mínima",
+    "description": "TC-HU11-02: misma fecha checkin y checkout"
+  },
+  {
+    "checkin": "2025-01-01",
+    "checkout": "2025-01-03",
+    "expectedStatus": 400,
+    "expectedError": "pasado",
+    "description": "TC-HU11-03: fechas en el pasado"
+  }
+]
