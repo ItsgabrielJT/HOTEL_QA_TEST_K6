@@ -46,20 +46,6 @@ services:
       retries: 5
       start_period: 15s
 
-  k6:
-    image: grafana/k6:latest
-    networks:
-      - k6
-    ports:
-      - "6565:6565"
-    environment:
-      - K6_OUT=influxdb=http://influxdb:8086/k6
-      - K6_ENV=${K6_ENV:-local}
-      - QA_BASE_URL=${QA_BASE_URL:-http://host.docker.internal:3000/api/v1}
-    volumes:
-      - ./:/k6-tests
-    depends_on:
-      influxdb:
-        condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+  # k6 corre como binario en el host (no como contenedor) para poder
+  # conectarse directamente a la API backend que también corre en el host.
+  # Ver scripts/run-k6-qa.sh — modo k6.
