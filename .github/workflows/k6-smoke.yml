@@ -13,13 +13,21 @@ concurrency:
 on:
   workflow_dispatch:
     inputs:
-      qa_api_url:
-        description: URL base de la API bajo prueba (ej. http://host:3000/api/v1)
+      target_repo_url:
+        description: URL del repo backend a clonar (ej. https://github.com/org/HOTEL-MVP.git)
         required: false
-      k6_env:
-        description: Entorno k6 (local | qa | staging)
+      target_repo_branch:
+        description: Rama del repo backend (por defecto 'dev')
         required: false
-        default: qa
+        default: dev
+      qa_api_port:
+        description: Puerto del backend (por defecto 3100)
+        required: false
+        default: '3100'
+      qa_db_port:
+        description: Puerto de PostgreSQL (por defecto 5540)
+        required: false
+        default: '5540'
       failure_issues_enabled:
         description: Crear issue automático cuando fallen los tests
         required: false
@@ -61,25 +69,19 @@ jobs:
     name: Lint
     uses: ./.github/workflows/reusable-lint.yml
 
-  infra:
-    name: Start Infrastructure
-    needs: lint
-    uses: ./.github/workflows/reusable-infra.yml
-    with:
-      qa_api_url: ${{ inputs.qa_api_url }}
-      k6_env: ${{ inputs.k6_env || 'qa' }}
-
   smoke-tests:
     name: K6 Smoke Tests
-    needs: infra
+    needs: lint
     uses: ./.github/workflows/reusable-tests.yml
     with:
-      qa_api_url: ${{ inputs.qa_api_url }}
-      k6_env: ${{ inputs.k6_env || 'qa' }}
+      target_repo_url: ${{ inputs.target_repo_url }}
+      target_repo_branch: ${{ inputs.target_repo_branch || 'dev' }}
+      qa_api_port: ${{ inputs.qa_api_port || '3100' }}
+      qa_db_port: ${{ inputs.qa_db_port || '5540' }}
 
   publish-report:
     name: Publish Report & Summary
-    needs: [smoke-tests]
+    needs: [lint, smoke-tests]
     if: >-
       always() &&
       github.event_name != 'pull_request' &&
