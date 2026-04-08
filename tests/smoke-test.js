@@ -23,7 +23,7 @@
  *   k6 run -e K6_ENV=qa tests/smoke-test.js
  */
 
-import { group, sleep } from 'k6';
+import { check, group, sleep } from 'k6';
 import http from 'k6/http';
 import { BASE_THRESHOLDS } from '../config/thresholds.js';
 import { SMOKE_WORKLOAD } from '../config/workloads.js';
@@ -38,7 +38,7 @@ http.setResponseCallback(
 import { searchAvailability } from '../scenarios/availability-scenario.js';
 import { createHoldHappyPath, createHoldOnBlockedRoom } from '../scenarios/hold-scenario.js';
 import { processPayment } from '../scenarios/payment-scenario.js';
-import { verifyConfirmedReservation, verifyHoldNotConfirmedAfterDecline } from '../scenarios/reservation-scenario.js';
+import { verifyConfirmedReservation, verifyHoldNotConfirmedAfterDecline, sendLateDeclinedSignal } from '../scenarios/reservation-scenario.js';
 import {
   holdWithCheckoutBeforeCheckin,
   holdWithSameDate,
@@ -147,8 +147,17 @@ export default function () {
 
     sleep(0.5);
 
+    // Guard explícito: si payStatus es null, la API no devolvió un resultado
+    // reconocible y TC-HU6-01/02 no deben saltearse silenciosamente.
+    check(null, {
+      'TC-HU6 | processPayment retornó status SUCCESS o DECLINED': () =>
+        payStatus === 'SUCCESS' || payStatus === 'DECLINED',
+    });
+
     if (payStatus === 'SUCCESS') {
       verifyConfirmedReservation(holdId, checkin, checkout);
+      // TC-HU7-01: señal DECLINED tardía sobre hold ya CONFIRMED → ignorada
+      sendLateDeclinedSignal(holdId, pricePerNight, generateIdempotencyKey());
     } else if (payStatus === 'DECLINED') {
       verifyHoldNotConfirmedAfterDecline(holdId);
     }
