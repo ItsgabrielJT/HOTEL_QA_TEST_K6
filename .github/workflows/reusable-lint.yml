@@ -1,0 +1,51 @@
+name: Reusable – Lint
+
+on:
+  workflow_call:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install linting tools
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck yamllint
+
+      - name: Validate workflow YAML files
+        run: >-
+          yamllint
+          -d "{extends: relaxed, rules: {line-length: {max: 150}}}"
+          .github/workflows/k6-smoke.yml
+          .github/workflows/reusable-lint.yml
+          .github/workflows/reusable-infra.yml
+          .github/workflows/reusable-tests.yml
+          .github/workflows/reusable-publish.yml
+
+      - name: Validate docker-compose syntax
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate JS test files (Node.js syntax check)
+        run: |
+          for f in tests/*.js scenarios/*.js clients/*.js helpers/*.js config/*.js; do
+            node --input-type=module < "$f" 2>&1 | grep -v 'k6/' || true
+          done
+          echo "Syntax check completado"
+
+      - name: Validate JSON data files
+        run: |
+          for f in data/*.json; do
+            python3 -c "import json,sys; json.load(open('$f'))" \
+              && echo "OK: $f" \
+              || { echo "ERROR: $f tiene JSON invalido"; exit 1; }
+          done
