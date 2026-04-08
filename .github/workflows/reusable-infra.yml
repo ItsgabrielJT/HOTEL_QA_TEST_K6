@@ -1,0 +1,104 @@
+name: Reusable – Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      qa_api_url:
+        description: URL base de la API bajo prueba
+        type: string
+        required: false
+      k6_env:
+        description: Entorno k6 (local | qa | staging)
+        type: string
+        required: false
+        default: qa
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+
+  infra:
+    name: Start Infrastructure
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      COMPOSE_PROJECT_NAME: hotel-k6-infra-${{ github.run_id }}
+      QA_BASE_URL: ${{ inputs.qa_api_url || vars.K6_QA_BASE_URL || 'http://host.docker.internal:3000/api/v1' }}
+      K6_ENV: ${{ inputs.k6_env || 'qa' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Validate inputs
+        run: |
+          if [[ -n "$QA_BASE_URL" ]]; then
+            if ! echo "$QA_BASE_URL" | grep -qE '^https?://'; then
+              echo "::error::qa_api_url debe comenzar con http:// o https://"
+              exit 1
+            fi
+          fi
+
+      - name: Start InfluxDB and Grafana
+        run: |
+          docker compose up -d influxdb grafana
+          echo "Servicios de observabilidad iniciados"
+
+      - name: Wait for InfluxDB health
+        run: |
+          echo "Esperando InfluxDB en http://localhost:8086/ping ..."
+          for i in $(seq 1 30); do
+            if curl --fail --silent --max-time 3 http://localhost:8086/ping; then
+              echo "InfluxDB listo"
+              break
+            fi
+            echo "Intento $i/30 — reintentando en 5s..."
+            sleep 5
+          done
+          curl --fail --silent http://localhost:8086/ping \
+            || { echo "::error::InfluxDB no respondio"; exit 1; }
+
+      - name: Wait for Grafana health
+        run: |
+          echo "Esperando Grafana en http://localhost:3000/api/health ..."
+          for i in $(seq 1 30); do
+            if curl --fail --silent --max-time 3 http://localhost:3000/api/health | grep -q '"database": "ok"'; then
+              echo "Grafana listo"
+              break
+            fi
+            echo "Intento $i/30 — reintentando en 5s..."
+            sleep 5
+          done
+          curl --fail --silent http://localhost:3000/api/health \
+            || { echo "::error::Grafana no respondio"; exit 1; }
+
+      - name: Publish infra summary
+        if: always()
+        run: |
+          {
+            echo "## Infraestructura de Observabilidad"
+            echo ""
+            echo "| Servicio  | Estado | URL |"
+            echo "|-----------|--------|-----|"
+            if curl --fail --silent --max-time 3 http://localhost:8086/ping > /dev/null 2>&1; then
+              echo "| InfluxDB  | ✅ OK  | http://localhost:8086 |"
+            else
+              echo "| InfluxDB  | ❌ FAIL | http://localhost:8086 |"
+            fi
+            if curl --fail --silent --max-time 3 http://localhost:3000/api/health > /dev/null 2>&1; then
+              echo "| Grafana   | ✅ OK  | http://localhost:3000 |"
+            else
+              echo "| Grafana   | ❌ FAIL | http://localhost:3000 |"
+            fi
+            echo ""
+            echo "> Datos de métricas enviados a InfluxDB database: \`k6\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Teardown infrastructure
+        if: always()
+        run: docker compose down --volumes --remove-orphans
