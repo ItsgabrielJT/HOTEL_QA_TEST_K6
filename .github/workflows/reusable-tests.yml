@@ -3,15 +3,22 @@ name: Reusable – K6 Smoke Tests
 on:
   workflow_call:
     inputs:
-      qa_api_url:
-        description: URL base de la API bajo prueba
+      target_repo_url:
+        description: URL del repo backend a clonar (ej. https://github.com/org/HOTEL-MVP.git)
         type: string
         required: false
-      k6_env:
-        description: Entorno k6 (local | qa | staging)
+      target_repo_branch:
+        description: Rama del repo backend (por defecto vars.K6_TARGET_REPO_BRANCH o 'dev')
         type: string
         required: false
-        default: qa
+      qa_api_port:
+        description: Puerto del backend (por defecto vars.K6_QA_API_PORT o 3100)
+        type: string
+        required: false
+      qa_db_port:
+        description: Puerto de PostgreSQL (por defecto vars.K6_QA_DB_PORT o 5540)
+        type: string
+        required: false
     outputs:
       smoke_exit_code:
         description: Código de salida del test k6
@@ -25,54 +32,30 @@ jobs:
   smoke-tests:
     name: K6 Smoke Tests
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     outputs:
       smoke_exit_code: ${{ steps.run-k6.outputs.exit_code }}
     env:
       COMPOSE_PROJECT_NAME: hotel-k6-tests-${{ github.run_id }}
-      QA_BASE_URL: ${{ inputs.qa_api_url || vars.K6_QA_BASE_URL || 'http://host.docker.internal:3000/api/v1' }}
-      K6_ENV: ${{ inputs.k6_env || 'qa' }}
-      K6_ARTIFACTS_DIR: ${{ github.workspace }}/k6-artifacts
+      TARGET_REPO_URL: ${{ inputs.target_repo_url || vars.K6_TARGET_REPO_URL || 'https://github.com/EGgames/HOTEL-MVP.git' }}
+      TARGET_REPO_BRANCH: ${{ inputs.target_repo_branch || vars.K6_TARGET_REPO_BRANCH || 'dev' }}
+      QA_API_PORT: ${{ inputs.qa_api_port || vars.K6_QA_API_PORT || '3100' }}
+      QA_DB_PORT: ${{ inputs.qa_db_port || vars.K6_QA_DB_PORT || '5540' }}
+      QA_ARTIFACTS_DIR: ${{ github.workspace }}/qa-artifacts/k6
+      TARGET_CLONE_DIR: ${{ github.workspace }}/target-under-test
 
     steps:
-      - name: Checkout repository
+      - name: Checkout QA repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Create artifacts directory
-        run: mkdir -p "$K6_ARTIFACTS_DIR/reports" "$K6_ARTIFACTS_DIR/logs"
-
-      - name: Start InfluxDB and Grafana
-        run: |
-          docker compose up -d influxdb grafana
-          echo "Servicios de observabilidad iniciados"
-
-      - name: Wait for InfluxDB readiness
-        run: |
-          echo "Esperando InfluxDB..."
-          for i in $(seq 1 30); do
-            if curl --fail --silent --max-time 3 http://localhost:8086/ping; then
-              echo "InfluxDB listo en intento $i"
-              break
-            fi
-            sleep 5
-          done
-          curl --fail --silent http://localhost:8086/ping \
-            || { echo "::error::InfluxDB no respondio a tiempo"; exit 1; }
-
-      - name: Wait for Grafana readiness
-        run: |
-          echo "Esperando Grafana..."
-          for i in $(seq 1 30); do
-            if curl --fail --silent --max-time 3 http://localhost:3000/api/health | grep -q '"database": "ok"'; then
-              echo "Grafana listo en intento $i"
-              break
-            fi
-            sleep 5
-          done
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Install k6
         run: |
@@ -84,71 +67,40 @@ jobs:
           sudo apt-get install -y k6
           k6 version
 
-      - name: Run K6 Smoke Test
+      - name: Create artifacts directory
+        run: mkdir -p "$QA_ARTIFACTS_DIR/reports" "$QA_ARTIFACTS_DIR/logs"
+
+      - name: Start infrastructure (clone target + Postgres + backend + InfluxDB + Grafana)
+        run: bash scripts/run-k6-qa.sh
+        env:
+          QA_MODE: infra
+
+      - name: Run K6 Smoke Tests
         id: run-k6
         run: |
           set +e
-          k6 run \
-            --out influxdb=http://localhost:8086/k6 \
-            -e K6_ENV="$K6_ENV" \
-            -e QA_BASE_URL="$QA_BASE_URL" \
-            --summary-export="$K6_ARTIFACTS_DIR/reports/summary.json" \
-            tests/smoke-test.js \
-            2>&1 | tee "$K6_ARTIFACTS_DIR/logs/k6-smoke.log"
+          bash scripts/run-k6-qa.sh
           EXIT_CODE=$?
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
-          echo "K6 finalizo con codigo: $EXIT_CODE"
           exit $EXIT_CODE
+        env:
+          QA_MODE: k6
 
-      - name: Export Grafana dashboard snapshot
-        if: always()
-        run: |
-          # Esperar que los datos lleguen a Grafana
-          sleep 10
-
-          # Buscar el UID del dashboard provisionado
-          DASHBOARD_UID=$(curl --silent \
-            "http://localhost:3000/api/search?type=dash-db" \
-            | python3 -c "import json,sys; ds=json.load(sys.stdin); print(ds[0]['uid'] if ds else 'not-found')" \
-            2>/dev/null || echo "not-found")
-
-          echo "Dashboard UID: $DASHBOARD_UID"
-
-          if [[ "$DASHBOARD_UID" != "not-found" ]]; then
-            # Crear snapshot de Grafana
-            SNAPSHOT=$(curl --silent --request POST \
-              --url "http://localhost:3000/api/snapshots" \
-              --header "Content-Type: application/json" \
-              --data "{
-                \"dashboard\": $(curl --silent http://localhost:3000/api/dashboards/uid/$DASHBOARD_UID | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get(\"dashboard\",{})))'),
-                \"expires\": 604800,
-                \"name\": \"K6 Smoke Test - Run ${{ github.run_id }}\"
-              }" 2>/dev/null)
-
-            SNAPSHOT_URL=$(echo "$SNAPSHOT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('url',''))" 2>/dev/null || echo "")
-            echo "GRAFANA_SNAPSHOT_URL=$SNAPSHOT_URL" >> "$GITHUB_ENV"
-            echo "Snapshot URL: $SNAPSHOT_URL"
-          fi
-
-          # Exportar JSON completo del dashboard para artifacts
-          curl --silent "http://localhost:3000/api/dashboards/uid/$DASHBOARD_UID" \
-            > "$K6_ARTIFACTS_DIR/reports/grafana-dashboard-export.json" 2>/dev/null || true
-
-      - name: Generate HTML report from k6 summary
+      - name: Generate HTML report
         if: always()
         run: |
           bash scripts/generate-smoke-report.sh \
-            "$K6_ARTIFACTS_DIR/reports/summary.json" \
-            "$K6_ARTIFACTS_DIR/reports/smoke-report.html" \
+            "$QA_ARTIFACTS_DIR/reports/summary.json" \
+            "$QA_ARTIFACTS_DIR/reports/smoke-report.html" \
             "${{ github.run_id }}" \
             "${{ github.sha }}" \
-            "${GRAFANA_SNAPSHOT_URL:-}" \
+            "" \
             2>/dev/null || echo "::warning::Reporte HTML no generado (summary.json no disponible)"
 
       - name: Publish test summary to GitHub Step Summary
         if: always()
         run: |
-          SUMMARY="$K6_ARTIFACTS_DIR/reports/summary.json"
+          SUMMARY="$QA_ARTIFACTS_DIR/reports/summary.json"
           EXIT_CODE="${{ steps.run-k6.outputs.exit_code }}"
 
           if [[ "$EXIT_CODE" == "0" ]]; then
@@ -165,9 +117,9 @@ jobs:
             echo "| Campo | Valor |"
             echo "|-------|-------|"
             echo "| Run ID | \`${{ github.run_id }}\` |"
-            echo "| Commit | \`${{ github.sha }}\` |"
-            echo "| Entorno | \`$K6_ENV\` |"
-            echo "| API URL | \`$QA_BASE_URL\` |"
+            echo "| Commit QA | \`${{ github.sha }}\` |"
+            echo "| Target Branch | \`$TARGET_REPO_BRANCH\` |"
+            echo "| API Port | \`$QA_API_PORT\` |"
             echo ""
 
             if [[ -f "$SUMMARY" ]]; then
@@ -190,24 +142,29 @@ jobs:
             else
               echo "> summary.json no disponible — el test pudo haber fallado antes de generar métricas."
             fi
-
-            if [[ -n "${GRAFANA_SNAPSHOT_URL:-}" ]]; then
-              echo ""
-              echo "### Dashboard Grafana"
-              echo ""
-              echo "[Ver snapshot en Grafana]($GRAFANA_SNAPSHOT_URL)"
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Teardown infrastructure
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: |
+          STATE="$QA_ARTIFACTS_DIR/.k6-qa-state"
+          if [[ -f "$STATE" ]]; then
+            API_PID=$(grep '^API_PID=' "$STATE" | cut -d= -f2 | tr -d "'" || echo '')
+            if [[ -n "$API_PID" ]] && kill -0 "$API_PID" 2>/dev/null; then
+              kill "$API_PID" || true
+            fi
+            TARGET_COMPOSE=$(grep '^TARGET_COMPOSE_FILE=' "$STATE" | cut -d= -f2 | tr -d "'" || echo '')
+            if [[ -n "$TARGET_COMPOSE" && -f "$TARGET_COMPOSE" ]]; then
+              docker compose -f "$TARGET_COMPOSE" down -v --remove-orphans || true
+            fi
+          fi
+          docker compose -f docker-compose.yml down -v --remove-orphans || true
 
       - name: Upload K6 artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: k6-smoke-artifacts-${{ github.run_id }}
-          path: ${{ env.K6_ARTIFACTS_DIR }}
+          path: ${{ env.QA_ARTIFACTS_DIR }}
           if-no-files-found: warn
           retention-days: 14
