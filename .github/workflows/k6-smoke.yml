@@ -1,0 +1,98 @@
+name: K6 Smoke QA
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+concurrency:
+  group: k6-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      qa_api_url:
+        description: URL base de la API bajo prueba (ej. http://host:3000/api/v1)
+        required: false
+      k6_env:
+        description: Entorno k6 (local | qa | staging)
+        required: false
+        default: qa
+      failure_issues_enabled:
+        description: Crear issue automático cuando fallen los tests
+        required: false
+        default: 'false'
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/k6-smoke.yml
+      - .github/workflows/reusable-*.yml
+      - tests/**
+      - scenarios/**
+      - clients/**
+      - config/**
+      - helpers/**
+      - data/**
+      - docker-compose.yml
+      - grafana/**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/k6-smoke.yml
+      - .github/workflows/reusable-*.yml
+      - tests/**
+      - scenarios/**
+      - clients/**
+      - config/**
+      - helpers/**
+      - data/**
+      - docker-compose.yml
+      - grafana/**
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+
+  lint:
+    name: Lint
+    uses: ./.github/workflows/reusable-lint.yml
+
+  infra:
+    name: Start Infrastructure
+    needs: lint
+    uses: ./.github/workflows/reusable-infra.yml
+    with:
+      qa_api_url: ${{ inputs.qa_api_url }}
+      k6_env: ${{ inputs.k6_env || 'qa' }}
+
+  smoke-tests:
+    name: K6 Smoke Tests
+    needs: infra
+    uses: ./.github/workflows/reusable-tests.yml
+    with:
+      qa_api_url: ${{ inputs.qa_api_url }}
+      k6_env: ${{ inputs.k6_env || 'qa' }}
+
+  publish-report:
+    name: Publish Report & Summary
+    needs: [smoke-tests]
+    if: >-
+      always() &&
+      github.event_name != 'pull_request' &&
+      (
+        needs.smoke-tests.result == 'success' ||
+        needs.smoke-tests.result == 'failure'
+      )
+    uses: ./.github/workflows/reusable-publish.yml
+    permissions:
+      contents: read
+      issues: write
+      pages: write
+      id-token: write
+    with:
+      failure_issues_enabled: ${{ inputs.failure_issues_enabled || 'false' }}
+      smoke_result: ${{ needs.smoke-tests.result }}
