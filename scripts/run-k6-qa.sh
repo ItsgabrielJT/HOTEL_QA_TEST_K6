@@ -431,6 +431,60 @@ print(url)
     fi
   fi
 
+  # ── Capturar screenshots del dashboard mediante Grafana Image Renderer ──────
+  GRAFANA_SCREENSHOTS_DIR="${REPORTS_DIR}/grafana-screenshots"
+  mkdir -p "${GRAFANA_SCREENSHOTS_DIR}"
+
+  # Calcular rango de tiempo: desde 5 minutos antes del inicio del test
+  RENDER_TIME_FROM="now-10m"
+  RENDER_TIME_TO="now"
+
+  # Panel IDs del dashboard k6 (k6-dashboard.json):
+  #   1  = Virtual Users
+  #  17  = Requests per Second
+  #   7  = Errors per Second
+  #   5  = HTTP Duration over time (línea)
+  #   8  = HTTP Duration heatmap
+  declare -A PANELS_TO_CAPTURE=(
+    [1]="virtual-users"
+    [17]="requests-per-second"
+    [7]="errors-per-second"
+    [5]="http-duration-over-time"
+    [8]="http-duration-heatmap"
+  )
+
+  # Dar tiempo al renderer para que arranque
+  sleep 3
+
+  # Screenshot del dashboard completo (vista kiosk)
+  log "Capturando screenshot del dashboard completo..."
+  curl --silent --max-time 45 \
+    "http://localhost:3000/render/d/k6/k6-load-testing-results?from=${RENDER_TIME_FROM}&to=${RENDER_TIME_TO}&width=1280&height=720&tz=UTC&kiosk=tv" \
+    -o "${GRAFANA_SCREENSHOTS_DIR}/dashboard-full.png" \
+    2>/dev/null \
+    && log "Screenshot completo capturado" \
+    || log "Advertencia: screenshot completo no disponible"
+
+  # Screenshots de paneles individuales
+  for PANEL_ID in "${!PANELS_TO_CAPTURE[@]}"; do
+    PANEL_SLUG="${PANELS_TO_CAPTURE[$PANEL_ID]}"
+    log "Capturando panel ${PANEL_ID} (${PANEL_SLUG})..."
+    curl --silent --max-time 30 \
+      "http://localhost:3000/render/d-solo/k6/k6-load-testing-results?panelId=${PANEL_ID}&from=${RENDER_TIME_FROM}&to=${RENDER_TIME_TO}&width=800&height=400&tz=UTC" \
+      -o "${GRAFANA_SCREENSHOTS_DIR}/panel-${PANEL_SLUG}.png" \
+      2>/dev/null \
+      && log "Panel ${PANEL_SLUG} capturado" \
+      || log "Advertencia: panel ${PANEL_SLUG} no disponible"
+  done
+
+  # Verificar que al menos el dashboard completo tenga contenido
+  if [[ -s "${GRAFANA_SCREENSHOTS_DIR}/dashboard-full.png" ]]; then
+    log "Screenshots de Grafana guardados en ${GRAFANA_SCREENSHOTS_DIR}"
+  else
+    log "Advertencia: los screenshots de Grafana no tienen contenido — el renderer puede no estar listo"
+    rm -rf "${GRAFANA_SCREENSHOTS_DIR}"
+  fi
+
   # Generar reporte HTML
   if [[ -f "${REPORTS_DIR}/summary.json" ]]; then
     bash "${ROOT_DIR}/scripts/generate-smoke-report.sh" \
@@ -439,6 +493,7 @@ print(url)
       "${GITHUB_RUN_ID:-local}" \
       "${TARGET_COMMIT:-local}" \
       "${GRAFANA_SNAPSHOT_URL}" \
+      "${GRAFANA_SCREENSHOTS_DIR}" \
       2>/dev/null || log 'Advertencia: reporte HTML no generado'
   fi
 

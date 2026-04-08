@@ -93,12 +93,17 @@ jobs:
           if [[ -f "$QA_ARTIFACTS_DIR/reports/grafana-snapshot.url" ]]; then
             GRAFANA_URL=$(cat "$QA_ARTIFACTS_DIR/reports/grafana-snapshot.url")
           fi
+          GRAFANA_SCREENSHOTS_DIR=""
+          if [[ -d "$QA_ARTIFACTS_DIR/reports/grafana-screenshots" ]]; then
+            GRAFANA_SCREENSHOTS_DIR="$QA_ARTIFACTS_DIR/reports/grafana-screenshots"
+          fi
           bash scripts/generate-smoke-report.sh \
             "$QA_ARTIFACTS_DIR/reports/summary.json" \
             "$QA_ARTIFACTS_DIR/reports/smoke-report.html" \
             "${{ github.run_id }}" \
             "${{ github.sha }}" \
             "$GRAFANA_URL" \
+            "$GRAFANA_SCREENSHOTS_DIR" \
             2>/dev/null || echo "::warning::Reporte HTML no generado (summary.json no disponible)"
 
       - name: Publish test summary to GitHub Step Summary

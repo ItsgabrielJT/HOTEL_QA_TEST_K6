@@ -14,6 +14,7 @@ OUTPUT_HTML="${2:?Falta ruta de salida HTML}"
 RUN_ID="${3:-N/A}"
 COMMIT_SHA="${4:-N/A}"
 GRAFANA_URL="${5:-}"
+GRAFANA_SCREENSHOTS_DIR="${6:-}"
 
 if [[ ! -f "$SUMMARY_JSON" ]]; then
   echo "ERROR: $SUMMARY_JSON no existe" >&2
@@ -135,22 +136,46 @@ else
 fi
 
 # ── Sección Grafana (opcional) ────────────────────────────────────────────────
+
+# Codificar screenshots en base64 si el directorio existe
+GRAFANA_SCREENSHOTS_HTML=""
+if [[ -n "${GRAFANA_SCREENSHOTS_DIR}" && -d "${GRAFANA_SCREENSHOTS_DIR}" ]]; then
+  for PNG_ORDER in dashboard-full panel-virtual-users panel-requests-per-second panel-errors-per-second panel-http-duration-over-time panel-http-duration-heatmap; do
+    PNG_FILE="${GRAFANA_SCREENSHOTS_DIR}/${PNG_ORDER}.png"
+    if [[ -s "${PNG_FILE}" ]]; then
+      B64=$(base64 < "${PNG_FILE}" | tr -d '\n')
+      LABEL=$(echo "${PNG_ORDER}" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}')
+      GRAFANA_SCREENSHOTS_HTML+="<div class=\"grafana-panel\"><p class=\"panel-label\">${LABEL}</p><img src=\"data:image/png;base64,${B64}\" alt=\"${LABEL}\" loading=\"lazy\" /></div>"
+    fi
+  done
+fi
+
 GRAFANA_SECTION=""
-if [[ -n "$GRAFANA_URL" ]]; then
-  GRAFANA_SECTION="
-      <div class=\"card\">
-        <h2>Dashboard Grafana</h2>
+if [[ -n "${GRAFANA_SCREENSHOTS_HTML}" || -n "${GRAFANA_URL}" ]]; then
+  GRAFANA_PANELS_CONTENT=""
+  if [[ -n "${GRAFANA_SCREENSHOTS_HTML}" ]]; then
+    GRAFANA_PANELS_CONTENT="
+        <div class=\"grafana-screenshots\">
+          ${GRAFANA_SCREENSHOTS_HTML}
+        </div>"
+  fi
+
+  GRAFANA_LINK_CONTENT=""
+  if [[ -n "${GRAFANA_URL}" ]]; then
+    GRAFANA_LINK_CONTENT="
         <p style=\"margin-bottom:1rem;color:#475569;font-size:0.9rem;\">
-          Dashboard de esta ejecución como snapshot público de Grafana (disponible 7 días).
+          También disponible como snapshot público en Grafana (7 días).
         </p>
         <a class=\"link-btn grafana-btn\" href=\"${GRAFANA_URL}\" target=\"_blank\" rel=\"noopener noreferrer\">
           Ver Dashboard en Grafana ↗
-        </a>
-        <div style=\"margin-top:1.5rem;\">
-          <iframe src=\"${GRAFANA_URL}&kiosk=tv\" width=\"100%\" height=\"580\"
-            frameborder=\"0\" style=\"border-radius:8px;border:1px solid #e2e8f0;\"
-            title=\"Grafana Dashboard Snapshot\"></iframe>
-        </div>
+        </a>"
+  fi
+
+  GRAFANA_SECTION="
+      <div class=\"card\" id=\"grafana-section\">
+        <h2>Dashboard Grafana — Métricas K6</h2>
+        ${GRAFANA_LINK_CONTENT}
+        ${GRAFANA_PANELS_CONTENT}
       </div>"
 fi
 
@@ -215,6 +240,9 @@ cat > "$OUTPUT_HTML" << HTML
     code { background: #f1f5f9; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.82em; font-family: "SF Mono","Fira Code",monospace; }
     .link-btn { display: inline-flex; align-items: center; padding: 0.5rem 1.1rem; background: #3b82f6; color: white; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600; }
     .grafana-btn { background: #f46800; }
+    .grafana-screenshots { display: flex; flex-direction: column; gap: 1.5rem; margin-top: 1.25rem; }
+    .grafana-panel .panel-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #64748b; margin-bottom: 0.5rem; }
+    .grafana-panel img { width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; display: block; }
     footer { text-align: center; color: #94a3b8; font-size: 0.8rem; padding-top: 1.5rem; }
     @media (max-width: 650px) { header h1 { font-size: 1.4rem; } .grid { grid-template-columns: 1fr 1fr; } .charts-row { grid-template-columns: 1fr; } }
   </style>
