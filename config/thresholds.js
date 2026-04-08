@@ -41,3 +41,23 @@ export const AVAILABILITY_THRESHOLDS = {
 export const PAYMENT_THRESHOLDS = {
   'http_req_duration{endpoint:process_payment}': ['p(95)<1000'],
 };
+
+/**
+ * Umbrales para la prueba de doble-booking.
+ *
+ * Métrica principal: reservas confirmadas para el mismo slot (habitación + rango de fechas).
+ * Umbral MVP: 0 doble-bookings con 20 usuarios simultáneos.
+ *
+ *  - double_booking_reservations_confirmed < 2
+ *      Solo 0 o 1 reserva puede quedar CONFIRMED para el mismo slot.
+ *      Si llega a 2+, hay doble-booking.
+ *
+ *  - double_booking_holds_created < 2
+ *      El hold-lock debe rechazar el segundo intento con 409/400.
+ *      Si 2+ holds son creados (201) sobre el mismo slot, el sistema
+ *      no está protegiendo atómicamente el inventario.
+ */
+export const DOUBLE_BOOKING_THRESHOLDS = {
+  'double_booking_reservations_confirmed': ['count<2'],
+  'double_booking_holds_created':          ['count<2'],
+};

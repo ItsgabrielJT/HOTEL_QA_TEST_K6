@@ -5,7 +5,7 @@
 **Fecha:** 2026-04-06  
 **Autor:** Joel Tates (QA)  
 **HUs en Alcance:** HU2, HU3, HU5, HU6, HU7, HU11  
-**Total de Casos:** 18 identificados (15 activos, 0 ignorados, 3 fuera de alcance)
+**Total de Casos:** 19 identificados (16 activos, 0 ignorados, 3 fuera de alcance)
 
 ## Contexto
 
@@ -40,6 +40,7 @@ Cobertura activa en la suite:
 - HU6: TC-HU6-01, TC-HU6-02, TC-HU6-03
 - HU7: TC-HU7-01
 - HU11: TC-HU11-01, TC-HU11-02, TC-HU11-03, TC-HU11-04
+- HU3/HU6 (concurrencia): TC-DB-01 (doble-booking bajo 20 VUs simultáneos)
 
 ## Fuera del alcance
 
@@ -71,6 +72,7 @@ Estado de cobertura del repositorio:
 | TC-HU6-03 | HU6 | Activo | `smoke-test.js`, `load-test.js` | Habitacion confirmada no aparece en disponibilidad. |
 | TC-HU7-01 | HU7 | Activo | `smoke-test.js` | Signal DECLINED tardia sobre hold CONFIRMED es ignorada. |
 | TC-HU7-02 | HU7 | No implementado | Sin test dedicado | Requiere manejo de eventos tardios no observable por API. |
+| TC-DB-01  | HU3/HU6 | Activo | `double-booking-test.js` | 0 reservas duplicadas para misma habitacion + rango bajo 20 VUs concurrentes. |
 | TC-HU11-01 | HU11 | Activo | `smoke-test.js`, `load-test.js` | Checkout anterior al checkin retorna 400. |
 | TC-HU11-02 | HU11 | Activo | `smoke-test.js`, `load-test.js` | Checkout igual al checkin retorna 400. |
 | TC-HU11-03 | HU11 | Activo | `smoke-test.js`, `load-test.js` | Checkin en el pasado retorna 400. |
@@ -132,6 +134,9 @@ k6 run tests/stress-test.js
 
 # 4. Idempotencia — HU5 focalizado
 k6 run tests/idempotency-test.js
+
+# 5. Doble-booking — 20 VUs concurrentes sobre el mismo slot (habilitacion + rango fijo)
+k6 run tests/double-booking-test.js
 ```
 
 ### Cambiar entorno
@@ -171,6 +176,7 @@ k6 run --out cloud tests/load-test.js
 - `tests/load-test.js`: 5-8 VUs en 3 escenarios paralelos (~3 minutos de duracion total).
 - `tests/stress-test.js`: hasta 50 VUs para buscar punto de quiebre.
 - `tests/idempotency-test.js`: prueba focalizada de idempotencia de pagos (HU5).
+- `tests/double-booking-test.js`: 20 VUs concurrentes sobre habilitacion y rango fijos; valida 0 doble-bookings (TC-DB-01).
 - `api.md`: contrato de la API bajo prueba (referencia).
 - `tc.md`: matriz de casos de prueba (referencia).
 
@@ -182,6 +188,7 @@ Salida en consola de k6 al finalizar cada corrida:
 - Tasa de fallos: `http_req_failed`.
 - Resultado de checks funcionales: `checks` con tasa de exito.
 - Metricas custom por dominio: `hold_duration`, `availability_duration`, `payment_duration`.
+- Metricas de doble-booking: `double_booking_holds_created` (holds con 201 para el slot fijo), `double_booking_reservations_confirmed` (reservas CONFIRMED para el slot fijo).
 - Resultado de thresholds: PASS/FAIL por cada SLO definido en `config/thresholds.js`.
 
 Para artefactos persistentes:
@@ -202,6 +209,7 @@ k6 run --out cloud tests/load-test.js
 - Los checks informativos (TC-HU5-03, TC-HU7-01) registran comportamiento observado sin romper el threshold de `checks`.
 - La API no requiere autenticacion segun el contrato observado: ningun endpoint exige header `Authorization`.
 - Los casos fuera de alcance no se borran: quedan documentados para reactivarlos cuando el backend exponga un contrato mas estable.
+- El test de doble-booking usa un rango de fechas fuera del pool (`2027-12-01/2027-12-04`) para no interferir con otros tests que corran en paralelo.
 
 ## Decisiones tecnicas
 
@@ -211,6 +219,7 @@ k6 run --out cloud tests/load-test.js
 - Los scenarios no hacen HTTP directo: todo pasa por `HotelApiClient` para centralizar tags de URL y evitar explosion de time series en las metricas.
 - `assertResponse` en `helpers/error-handler.js` registra el contexto completo del fallo (url, status, body, checks fallidos) en `console.error` para facilitar diagnostico.
 - `booking-flow-scenario.js` retorna null sin fallar checks cuando no hay disponibilidad, porque bajo carga el inventario se agota y `[]` es una respuesta valida del sistema.
+- `double-booking-test.js` usa `setup()` para fijar la habitacion objetivo antes de lanzar los VUs, garantizando que todos los 20 VUs compitan por el mismo slot. Los counters `double_booking_holds_created` y `double_booking_reservations_confirmed` acumulan a nivel de proceso; el threshold `count<2` falla si cualquiera de los dos supera 1.
 
 ## Conclusiones
 
