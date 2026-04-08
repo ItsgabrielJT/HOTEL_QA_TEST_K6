@@ -89,12 +89,16 @@ jobs:
       - name: Generate HTML report
         if: always()
         run: |
+          GRAFANA_URL=""
+          if [[ -f "$QA_ARTIFACTS_DIR/reports/grafana-snapshot.url" ]]; then
+            GRAFANA_URL=$(cat "$QA_ARTIFACTS_DIR/reports/grafana-snapshot.url")
+          fi
           bash scripts/generate-smoke-report.sh \
             "$QA_ARTIFACTS_DIR/reports/summary.json" \
             "$QA_ARTIFACTS_DIR/reports/smoke-report.html" \
             "${{ github.run_id }}" \
             "${{ github.sha }}" \
-            "" \
+            "$GRAFANA_URL" \
             2>/dev/null || echo "::warning::Reporte HTML no generado (summary.json no disponible)"
 
       - name: Publish test summary to GitHub Step Summary

@@ -397,10 +397,38 @@ ds = json.load(sys.stdin)
 print(ds[0]['uid'] if ds else 'not-found')
 " 2>/dev/null || echo 'not-found')
 
+  GRAFANA_SNAPSHOT_URL=''
   if [[ "${DASHBOARD_UID}" != 'not-found' ]]; then
-    curl --silent "http://localhost:3000/api/dashboards/uid/${DASHBOARD_UID}" \
-      > "${REPORTS_DIR}/grafana-dashboard-export.json" 2>/dev/null || true
-    log "Dashboard Grafana exportado (UID: ${DASHBOARD_UID})"
+    # Exportar el JSON completo del dashboard
+    DASHBOARD_FULL=$(curl --silent \
+      "http://localhost:3000/api/dashboards/uid/${DASHBOARD_UID}" 2>/dev/null || echo '{}')
+    echo "${DASHBOARD_FULL}" > "${REPORTS_DIR}/grafana-dashboard-export.json" || true
+
+    # Extraer solo el modelo del dashboard (sin metadata)
+    DASHBOARD_MODEL=$(echo "${DASHBOARD_FULL}" \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d.get('dashboard',{})))" \
+      2>/dev/null || echo '{}')
+
+    # Crear snapshot externo (hospedado en snapshots.raintank.io, público 7 días)
+    SNAPSHOT_RESP=$(curl --silent -X POST 'http://localhost:3000/api/snapshots' \
+      -H 'Content-Type: application/json' \
+      --data-raw "{\"dashboard\": ${DASHBOARD_MODEL}, \"name\": \"K6 Smoke - ${GITHUB_RUN_ID:-local}\", \"external\": true, \"expires\": 604800}" \
+      2>/dev/null || echo '{}')
+
+    GRAFANA_SNAPSHOT_URL=$(echo "${SNAPSHOT_RESP}" \
+      | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+url = d.get('externalUrl') or d.get('url') or ''
+print(url)
+" 2>/dev/null || echo '')
+
+    if [[ -n "${GRAFANA_SNAPSHOT_URL}" ]]; then
+      echo "${GRAFANA_SNAPSHOT_URL}" > "${REPORTS_DIR}/grafana-snapshot.url"
+      log "Grafana snapshot URL: ${GRAFANA_SNAPSHOT_URL}"
+    else
+      log "Advertencia: no se pudo crear el snapshot de Grafana"
+    fi
   fi
 
   # Generar reporte HTML
@@ -410,7 +438,7 @@ print(ds[0]['uid'] if ds else 'not-found')
       "${REPORTS_DIR}/smoke-report.html" \
       "${GITHUB_RUN_ID:-local}" \
       "${TARGET_COMMIT:-local}" \
-      "" \
+      "${GRAFANA_SNAPSHOT_URL}" \
       2>/dev/null || log 'Advertencia: reporte HTML no generado'
   fi
 
