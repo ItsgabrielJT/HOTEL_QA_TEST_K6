@@ -3,15 +3,27 @@ name: Reusable – Infrastructure
 on:
   workflow_call:
     inputs:
-      qa_api_url:
-        description: URL base de la API bajo prueba
+      target_repo_url:
+        description: URL del repo backend a clonar (ej. https://github.com/org/HOTEL-MVP.git)
         type: string
         required: false
-      k6_env:
-        description: Entorno k6 (local | qa | staging)
+      target_repo_branch:
+        description: Rama del repo backend (por defecto vars.K6_TARGET_REPO_BRANCH o 'dev')
         type: string
         required: false
-        default: qa
+      qa_api_port:
+        description: Puerto del backend (por defecto vars.K6_QA_API_PORT o 3100)
+        type: string
+        required: false
+      qa_db_port:
+        description: Puerto de PostgreSQL (por defecto vars.K6_QA_DB_PORT o 5540)
+        type: string
+        required: false
+      event_name:
+        description: Nombre del evento que disparó el workflow (para validar inputs)
+        type: string
+        required: false
+        default: ''
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -21,84 +33,90 @@ jobs:
   infra:
     name: Start Infrastructure
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
       COMPOSE_PROJECT_NAME: hotel-k6-infra-${{ github.run_id }}
-      QA_BASE_URL: ${{ inputs.qa_api_url || vars.K6_QA_BASE_URL || 'http://host.docker.internal:3000/api/v1' }}
-      K6_ENV: ${{ inputs.k6_env || 'qa' }}
+      TARGET_REPO_URL: ${{ inputs.target_repo_url || vars.K6_TARGET_REPO_URL || 'https://github.com/EGgames/HOTEL-MVP.git' }}
+      TARGET_REPO_BRANCH: ${{ inputs.target_repo_branch || vars.K6_TARGET_REPO_BRANCH || 'dev' }}
+      QA_API_PORT: ${{ inputs.qa_api_port || vars.K6_QA_API_PORT || '3100' }}
+      QA_DB_PORT: ${{ inputs.qa_db_port || vars.K6_QA_DB_PORT || '5540' }}
+      QA_ARTIFACTS_DIR: ${{ github.workspace }}/qa-artifacts/infra
+      TARGET_CLONE_DIR: ${{ github.workspace }}/target-under-test
+      QA_MODE: infra
 
     steps:
-      - name: Checkout repository
+      - name: Checkout QA repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Validate inputs
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate workflow_dispatch inputs
+        if: inputs.event_name == 'workflow_dispatch'
         run: |
-          if [[ -n "$QA_BASE_URL" ]]; then
-            if ! echo "$QA_BASE_URL" | grep -qE '^https?://'; then
-              echo "::error::qa_api_url debe comenzar con http:// o https://"
-              exit 1
-            fi
+          if [[ -n "$QA_API_PORT" && ! "$QA_API_PORT" =~ ^[0-9]{2,5}$ ]]; then
+            echo "::error::qa_api_port debe ser un número de puerto válido: '$QA_API_PORT'"
+            exit 1
+          fi
+          if [[ -n "$QA_DB_PORT" && ! "$QA_DB_PORT" =~ ^[0-9]{2,5}$ ]]; then
+            echo "::error::qa_db_port debe ser un número de puerto válido: '$QA_DB_PORT'"
+            exit 1
           fi
 
-      - name: Start InfluxDB and Grafana
-        run: |
-          docker compose up -d influxdb grafana
-          echo "Servicios de observabilidad iniciados"
+      - name: Start infrastructure (clone target + Postgres + backend + InfluxDB + Grafana)
+        run: bash scripts/run-k6-qa.sh
+        env:
+          QA_MODE: infra
 
-      - name: Wait for InfluxDB health
-        run: |
-          echo "Esperando InfluxDB en http://localhost:8086/ping ..."
-          for i in $(seq 1 30); do
-            if curl --fail --silent --max-time 3 http://localhost:8086/ping; then
-              echo "InfluxDB listo"
-              break
-            fi
-            echo "Intento $i/30 — reintentando en 5s..."
-            sleep 5
-          done
-          curl --fail --silent http://localhost:8086/ping \
-            || { echo "::error::InfluxDB no respondio"; exit 1; }
-
-      - name: Wait for Grafana health
-        run: |
-          echo "Esperando Grafana en http://localhost:3000/api/health ..."
-          for i in $(seq 1 30); do
-            if curl --fail --silent --max-time 3 http://localhost:3000/api/health | grep -q '"database": "ok"'; then
-              echo "Grafana listo"
-              break
-            fi
-            echo "Intento $i/30 — reintentando en 5s..."
-            sleep 5
-          done
-          curl --fail --silent http://localhost:3000/api/health \
-            || { echo "::error::Grafana no respondio"; exit 1; }
-
-      - name: Publish infra summary
+      - name: Publish infra summary to GitHub Step Summary
         if: always()
         run: |
-          {
-            echo "## Infraestructura de Observabilidad"
-            echo ""
-            echo "| Servicio  | Estado | URL |"
-            echo "|-----------|--------|-----|"
-            if curl --fail --silent --max-time 3 http://localhost:8086/ping > /dev/null 2>&1; then
-              echo "| InfluxDB  | ✅ OK  | http://localhost:8086 |"
-            else
-              echo "| InfluxDB  | ❌ FAIL | http://localhost:8086 |"
-            fi
-            if curl --fail --silent --max-time 3 http://localhost:3000/api/health > /dev/null 2>&1; then
-              echo "| Grafana   | ✅ OK  | http://localhost:3000 |"
-            else
-              echo "| Grafana   | ❌ FAIL | http://localhost:3000 |"
-            fi
-            echo ""
-            echo "> Datos de métricas enviados a InfluxDB database: \`k6\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          SUMMARY="qa-artifacts/infra/reports/infra-summary.md"
+          if [[ -f "$SUMMARY" ]]; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Infraestructura K6"
+              echo ""
+              echo "> No se generó el resumen de infraestructura."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Export infra metadata artifact
+        if: always()
+        run: |
+          mkdir -p qa-artifacts/infra/pipeline
+          printf 'TARGET_COMMIT=%s\n' \
+            "$(git -C target-under-test rev-parse HEAD 2>/dev/null || echo unknown)" \
+            > qa-artifacts/infra/pipeline/infra-meta.env
+
+      - name: Upload infra metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-meta-${{ github.run_id }}
+          path: qa-artifacts/infra/pipeline/infra-meta.env
+          retention-days: 1
 
       - name: Teardown infrastructure
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: |
+          # Detener backend Node si quedó corriendo (el STATE_FILE tiene el PID)
+          STATE="qa-artifacts/infra/.k6-qa-state"
+          if [[ -f "$STATE" ]]; then
+            API_PID=$(grep '^API_PID=' "$STATE" | cut -d= -f2 | tr -d "'" || echo '')
+            if [[ -n "$API_PID" ]] && kill -0 "$API_PID" 2>/dev/null; then
+              kill "$API_PID" || true
+            fi
+            TARGET_COMPOSE=$(grep '^TARGET_COMPOSE_FILE=' "$STATE" | cut -d= -f2 | tr -d "'" || echo '')
+            if [[ -n "$TARGET_COMPOSE" && -f "$TARGET_COMPOSE" ]]; then
+              docker compose -f "$TARGET_COMPOSE" down -v --remove-orphans || true
+            fi
+          fi
+          # Detener InfluxDB + Grafana
+          docker compose -f docker-compose.yml down -v --remove-orphans || true
