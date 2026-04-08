@@ -5,8 +5,6 @@ networks:
 services:
   influxdb:
     image: influxdb:1.8
-#    entrypoint: /bin/sh
-#    user: root
     networks:
       - k6
       - grafana
@@ -14,11 +12,15 @@ services:
       - "8086:8086"
     environment:
       - INFLUXDB_DB=k6
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   grafana:
     image: grafana/grafana:8.5.21
-#    entrypoint: /bin/sh
-#    user: root
     networks:
       - grafana
     ports:
@@ -28,20 +30,36 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_BASIC_ENABLED=false
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_RENDERING_SERVER_URL=http://renderer:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://grafana:3000/
     volumes:
       - ./grafana/provisioning/dashboards:/var/lib/grafana/dashboards
       - ./grafana/provisioning/dashboards/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yaml
       - ./grafana/provisioning/datasources/influxdb.yml:/etc/grafana/provisioning/datasources/datasource.yaml
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   k6:
     image: grafana/k6:latest
-#    entrypoint: /bin/sh
-#    user: root
     networks:
       - k6
     ports:
       - "6565:6565"
     environment:
       - K6_OUT=influxdb=http://influxdb:8086/k6
+      - K6_ENV=${K6_ENV:-local}
+      - QA_BASE_URL=${QA_BASE_URL:-http://host.docker.internal:3000/api/v1}
     volumes:
       - ./:/k6-tests
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
