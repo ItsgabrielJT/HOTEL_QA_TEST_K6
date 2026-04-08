@@ -1,0 +1,322 @@
+name: Reusable – Publish Report & Summary
+
+on:
+  workflow_call:
+    inputs:
+      failure_issues_enabled:
+        description: Crear issue automático cuando fallen los tests
+        type: string
+        required: false
+        default: 'false'
+      smoke_result:
+        description: Resultado del job smoke-tests (success | failure | cancelled | skipped)
+        type: string
+        required: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+
+  publish-and-notify:
+    name: Publish Report & Notify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      pages: write
+      id-token: write
+    environment:
+      name: k6-smoke-report
+      url: ${{ steps.deploy-pages.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download K6 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: k6-smoke-artifacts-${{ github.run_id }}
+          path: downloaded-artifacts/k6
+
+      - name: Build failure issue body
+        if: >-
+          inputs.smoke_result == 'failure' &&
+          inputs.failure_issues_enabled == 'true'
+        run: |
+          mkdir -p qa-artifacts/merged
+          {
+            echo "# K6 Smoke Test – Fallo detectado"
+            echo ""
+            echo "## Detalles del run"
+            echo ""
+            echo "- **Workflow run**: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- **Commit**: \`${GITHUB_SHA}\`"
+            echo "- **Rama**: \`${GITHUB_REF_NAME}\`"
+            echo "- **Resultado smoke**: ${{ inputs.smoke_result }}"
+            echo ""
+            echo "## Log del test (últimas 80 líneas)"
+            echo ""
+            echo '```text'
+            tail -n 80 downloaded-artifacts/k6/logs/k6-smoke.log 2>/dev/null \
+              || echo "Log no disponible"
+            echo '```'
+            echo ""
+            echo "## Métricas k6 (summary.json)"
+            echo ""
+            echo '```json'
+            python3 -c "
+          import json, sys
+          try:
+            with open('downloaded-artifacts/k6/reports/summary.json') as f:
+              d = json.load(f)
+            metrics = d.get('metrics', {})
+            keys = ['http_req_duration', 'http_req_failed', 'http_reqs', 'vus_max', 'checks']
+            out = {k: metrics[k] for k in keys if k in metrics}
+            print(json.dumps(out, indent=2))
+          except Exception as e:
+            print(f'summary.json no disponible: {e}')
+          " 2>/dev/null || echo "No disponible"
+            echo '```'
+          } > qa-artifacts/merged/issue-body.md
+
+          # Truncar si excede límite de GitHub Issues
+          MAX=60000
+          SIZE=$(wc -c < qa-artifacts/merged/issue-body.md | tr -d ' ')
+          if [ "$SIZE" -gt "$MAX" ]; then
+            tmp=$(mktemp)
+            head -c "$MAX" qa-artifacts/merged/issue-body.md > "$tmp"
+            printf '\n\n[contenido truncado por límite de GitHub Issues]\n' >> "$tmp"
+            mv "$tmp" qa-artifacts/merged/issue-body.md
+          fi
+
+      - name: Create or update failure issue
+        if: >-
+          inputs.smoke_result == 'failure' &&
+          inputs.failure_issues_enabled == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const title = `K6 Smoke Test failure: ${context.ref} @ ${context.sha.slice(0,7)}`;
+            const rawBody = fs.readFileSync('qa-artifacts/merged/issue-body.md', 'utf8');
+            const body = rawBody.length > 60000
+              ? rawBody.slice(0, 60000) + '\n\n[contenido truncado]'
+              : rawBody;
+            const labels = ['qa-failure', 'k6-smoke'];
+
+            for (const name of labels) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color: 'e11d48' });
+              } catch (e) {
+                if (e.status !== 422) throw e;
+              }
+            }
+
+            const search = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue in:title "${title}"`,
+              per_page: 1,
+            });
+
+            if (search.data.items.length > 0) {
+              const issue_number = search.data.items[0].number;
+              if (search.data.items[0].state === 'closed') {
+                await github.rest.issues.update({ owner, repo, issue_number, state: 'open' });
+              }
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels });
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info(`Issue actualizado: #${issue_number}`);
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, body, labels });
+              core.info(`Issue creado: #${created.data.number}`);
+            }
+
+      - name: Resolve open failure issue on success
+        if: >-
+          inputs.smoke_result == 'success' &&
+          inputs.failure_issues_enabled == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = `K6 Smoke Test failure: ${context.ref} @ ${context.sha.slice(0,7)}`;
+            const body = [
+              '# K6 Smoke Test – Recuperado',
+              '',
+              `Los tests volvieron a pasar en el run [${process.env.GITHUB_RUN_ID}](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}).`,
+              '',
+              'Issue cerrado automáticamente.',
+            ].join('\n');
+
+            const search = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} is:issue is:open in:title "${title}"`,
+              per_page: 1,
+            });
+
+            if (search.data.items.length > 0) {
+              const issue_number = search.data.items[0].number;
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
+              core.info(`Issue cerrado: #${issue_number}`);
+            } else {
+              core.info('No hay issue abierto para cerrar');
+            }
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Prepare GitHub Pages site
+        run: |
+          mkdir -p pages-site/assets
+
+          # Copiar reporte HTML si fue generado
+          if [ -f downloaded-artifacts/k6/reports/smoke-report.html ]; then
+            cp downloaded-artifacts/k6/reports/smoke-report.html pages-site/index.html
+          fi
+
+          # Copiar el JSON del dashboard de Grafana si existe
+          if [ -f downloaded-artifacts/k6/reports/grafana-dashboard-export.json ]; then
+            cp downloaded-artifacts/k6/reports/grafana-dashboard-export.json pages-site/assets/
+          fi
+
+          # Copiar el log como asset descargable
+          if [ -f downloaded-artifacts/k6/logs/k6-smoke.log ]; then
+            cp downloaded-artifacts/k6/logs/k6-smoke.log pages-site/assets/
+          fi
+
+          # Generar index.html de fallback si el reporte no existe
+          if [ ! -f pages-site/index.html ]; then
+            SMOKE_RESULT="${{ inputs.smoke_result }}"
+            if [ "$SMOKE_RESULT" = "success" ]; then
+              STATUS_COLOR="#16a34a"
+              STATUS_ICON="✅"
+            else
+              STATUS_COLOR="#dc2626"
+              STATUS_ICON="❌"
+            fi
+
+            cat > pages-site/index.html <<EOF
+          <!doctype html>
+          <html lang="es">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+              <title>K6 Smoke Test Report</title>
+              <style>
+                *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+                body {
+                  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                  background: #f8fafc;
+                  color: #1e293b;
+                  min-height: 100vh;
+                  padding: 2rem;
+                }
+                .container { max-width: 800px; margin: 0 auto; }
+                header {
+                  background: #1e293b;
+                  color: #f8fafc;
+                  padding: 2rem;
+                  border-radius: 12px;
+                  margin-bottom: 2rem;
+                }
+                header h1 { font-size: 1.75rem; font-weight: 700; }
+                header p { color: #94a3b8; margin-top: 0.5rem; font-size: 0.9rem; }
+                .badge {
+                  display: inline-block;
+                  padding: 0.5rem 1.25rem;
+                  border-radius: 9999px;
+                  font-weight: 700;
+                  font-size: 1.1rem;
+                  background: ${STATUS_COLOR};
+                  color: white;
+                  margin-top: 1rem;
+                }
+                .card {
+                  background: white;
+                  border-radius: 12px;
+                  padding: 1.5rem;
+                  margin-bottom: 1.5rem;
+                  border: 1px solid #e2e8f0;
+                  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+                }
+                .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; color: #475569; }
+                table { width: 100%; border-collapse: collapse; }
+                td { padding: 0.6rem 0.75rem; border-bottom: 1px solid #f1f5f9; font-size: 0.9rem; }
+                td:first-child { font-weight: 600; color: #64748b; width: 40%; }
+                .link-btn {
+                  display: inline-block;
+                  margin-top: 0.5rem;
+                  padding: 0.5rem 1rem;
+                  background: #3b82f6;
+                  color: white;
+                  border-radius: 6px;
+                  text-decoration: none;
+                  font-size: 0.85rem;
+                  font-weight: 600;
+                }
+                .link-btn:hover { background: #2563eb; }
+                footer { text-align: center; color: #94a3b8; font-size: 0.8rem; padding-top: 2rem; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <header>
+                  <h1>Hotel QA — K6 Smoke Tests</h1>
+                  <p>Reporte generado por GitHub Actions</p>
+                  <div class="badge">${STATUS_ICON} ${SMOKE_RESULT^^}</div>
+                </header>
+
+                <div class="card">
+                  <h2>Detalles del Run</h2>
+                  <table>
+                    <tr><td>Run ID</td><td><code>${{ github.run_id }}</code></td></tr>
+                    <tr><td>Commit</td><td><code>${{ github.sha }}</code></td></tr>
+                    <tr><td>Rama</td><td><code>${{ github.ref_name }}</code></td></tr>
+                    <tr><td>Resultado</td><td><strong>$SMOKE_RESULT</strong></td></tr>
+                    <tr><td>Workflow</td><td>
+                      <a class="link-btn" href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+                        Ver en GitHub Actions
+                      </a>
+                    </td></tr>
+                  </table>
+                </div>
+
+                <div class="card">
+                  <h2>Artefactos</h2>
+                  <table>
+                    <tr>
+                      <td>Log k6</td>
+                      <td><a href="assets/k6-smoke.log">k6-smoke.log</a></td>
+                    </tr>
+                    <tr>
+                      <td>Dashboard Grafana (JSON)</td>
+                      <td><a href="assets/grafana-dashboard-export.json">grafana-dashboard-export.json</a></td>
+                    </tr>
+                  </table>
+                </div>
+
+                <footer>
+                  Hotel QA K6 — Generado el $(date -u '+%Y-%m-%d %H:%M UTC')
+                </footer>
+              </div>
+            </body>
+          </html>
+          EOF
+          fi
+
+          touch pages-site/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-site
+
+      - name: Deploy GitHub Pages
+        id: deploy-pages
+        uses: actions/deploy-pages@v4
