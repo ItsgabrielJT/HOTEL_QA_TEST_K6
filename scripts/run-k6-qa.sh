@@ -24,7 +24,7 @@
 
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}") /.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACTS_DIR="${QA_ARTIFACTS_DIR:-${ROOT_DIR}/qa-artifacts/latest}"
 LOGS_DIR="${ARTIFACTS_DIR}/logs"
 REPORTS_DIR="${ARTIFACTS_DIR}/reports"
