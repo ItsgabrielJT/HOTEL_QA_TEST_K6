@@ -73,7 +73,7 @@ export function verifyConfirmedReservation(holdId, checkin, checkout) {
       {
         'TC-HU6-03 | disponibilidad retorna 200': (r) => r.status === 200,
         'TC-HU6-03 | habitación confirmada no aparece disponible': () => {
-          if (!Array.isArray(availBody)) return true; // array vacío / respuesta no esperada
+          if (!Array.isArray(availBody)) return false; // respuesta inválida → fallo real, no pase silencioso
           return !availBody.some((room) => room.id === holdBody.room_id);
         },
       },
@@ -100,7 +100,7 @@ export function verifyHoldNotConfirmedAfterDecline(holdId) {
     {
       'TC-HU6-02 | hold retorna 200': (r) => r.status === 200,
       'TC-HU6-02 | hold NO está CONFIRMED tras pago DECLINED': () =>
-        holdBody && holdBody.status !== 'CONFIRMED',
+        holdBody !== null && typeof holdBody === 'object' && holdBody.status !== 'CONFIRMED',
     },
     'verifyHoldNotConfirmedAfterDecline'
   );
