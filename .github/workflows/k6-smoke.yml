@@ -60,8 +60,6 @@ on:
       - data/**
       - docker-compose.yml
       - grafana/**
-  schedule:
-    - cron: '0 */6 * * *'
 
 jobs:
 
